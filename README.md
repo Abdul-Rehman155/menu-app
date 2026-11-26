@@ -52,6 +52,9 @@ On Windows, the API falls back to PowerShell DNS resolution for Atlas SRV record
 | `OWNER_PASSWORD` | Seed only | Initial owner password, at least 10 characters |
 | `SUPER_ADMIN_EMAIL` | Seed only | Email for a provisioned platform administrator |
 | `SUPER_ADMIN_PASSWORD` | Seed only | Initial admin password, at least 16 characters |
+| `CLOUDINARY_CLOUD_NAME` | Image upload only | Cloudinary account name |
+| `CLOUDINARY_API_KEY` | Image upload only | Server-side Cloudinary API key |
+| `CLOUDINARY_API_SECRET` | Image upload only | Server-side Cloudinary signing secret |
 | `VITE_API_URL` | No | Public API base URL compiled into the frontend |
 
 Provision or update the demo data without deleting existing records:
@@ -91,17 +94,21 @@ Customer order submission uses cash as the payment method and leaves payment pen
 - [x] Owner account registration/login, expiring JWT, role checks, and password change flow
 - [x] Restaurant ownership scoping in protected owner APIs
 - [x] Server-priced customer orders with item snapshots and unique order numbers
-- [x] Owner order search/pagination, lifecycle transitions, status history, and stored-order analytics
-- [x] Owner menu editing and restaurant settings
+- [x] Owner order polling, detail view, search/date/status filters, lifecycle transitions, and cancellation reasons
+- [x] Stored-order daily, weekly, and monthly revenue/order charts, status counts, and popular menu item analytics
+- [x] Menu/category CRUD, availability, featured flags, and optional signed Cloudinary image uploads
+- [x] Restaurant open/closed, hours, minimum order, taxes, delivery settings, and owner profile management
+- [x] Tenant-scoped customer history and date-filtered CSV sales reports
+- [x] Server-calculated tax/delivery totals and minimum-order/open-status checks at checkout
 - [x] Super admin login gate, restaurant overview, listing, activate/suspend endpoints and panel
 - [x] Non-destructive demo seed, deployment notes, env example, and secret ignore rules
 - [ ] Dedicated Category, Subscription, Payment, AuditLog, and PlatformSettings models/APIs
 - [ ] Subscription plan configuration and backend plan-limit enforcement
 - [ ] Payment provider integration (requires provider credentials and verified webhooks)
-- [ ] Cloudinary uploads (requires Cloudinary credentials); image URLs can currently be stored in settings/menu
+- [ ] Configure Cloudinary credentials before enabling image uploads in a deployment
 - [ ] QR generation/download and print layout
 - [ ] Admin audit logs and authorized admin account management
-- [ ] API schema docs, automated API/tenant-isolation tests, and deployment verification
+- [ ] API schema docs, authenticated API/tenant-isolation tests, and deployment verification
 - [ ] Dedicated Helmet, express-rate-limit, validation-library, React Router, and form-library packages. Registry access was unavailable during this implementation; the API currently has basic security headers, in-process request throttling, and explicit server validation.
 
 The current security headers and in-memory rate limits are starter safeguards; production deployment should install and configure Helmet and a shared rate-limit store. Do not consider the platform launch-ready until the incomplete items above are addressed and the deployed order flow is verified.
