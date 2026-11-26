@@ -1,29 +1,9 @@
 export default function Hero({ r }) {
   return (
-    <header className="relative overflow-hidden rounded-b-[2rem] bg-ink px-5 pb-8 pt-10 text-white">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-xs font-medium">
-            <span className="size-2 rounded-full bg-emerald-400" /> Abhi khula hai
-          </span>
-          <h1 className="mt-3 font-display text-4xl font-extrabold leading-tight">{r.name}</h1>
-          <p className="mt-1 text-white/70">{r.tagline}</p>
-        </div>
-        <svg viewBox="0 0 120 120" className="size-24 shrink-0" aria-hidden="true">
-          {[44, 60, 76].map((x) => (
-            <path key={x} className="steam" d={`M${x} 46 q-7 -9 0 -17 q7 -8 0 -16`} fill="none" stroke="#ffb627" strokeWidth="4" strokeLinecap="round" />
-          ))}
-          <path d="M25 55 h70 v10 a35 35 0 0 1 -35 35 a35 35 0 0 1 -35 -35z" fill="#ffb627" />
-          <path d="M95 62 h6 a12 12 0 0 1 0 24 h-10" fill="none" stroke="#ffb627" strokeWidth="6" />
-          <ellipse cx="60" cy="104" rx="44" ry="6" fill="#1f6f5b" />
-        </svg>
-      </div>
-      <div className="mt-5 flex flex-wrap gap-2 text-sm">
-        <span className="rounded-full bg-white/10 px-3 py-1.5">⭐ {r.rating}</span>
-        <span className="rounded-full bg-white/10 px-3 py-1.5">🕒 {r.eta}</span>
-        <span className="rounded-full bg-white/10 px-3 py-1.5">📍 {r.area}</span>
-      </div>
-      <p className="mt-3 text-xs text-white/60">{r.hours}</p>
+    <header className="relative overflow-hidden rounded-b-[2rem] bg-ink px-5 pb-8 pt-10 text-white" style={r.coverImage ? { backgroundImage: `linear-gradient(90deg, rgba(14,42,36,.94), rgba(14,42,36,.55)), url("${r.coverImage.replace(/["\\]/g, "")}")`, backgroundPosition: "center", backgroundSize: "cover" } : undefined}>
+      <div className="flex items-start justify-between gap-4"><div className="min-w-0">{r.logo && <img src={r.logo} alt={`${r.name} logo`} className="mb-3 size-12 rounded-xl object-cover" />}<span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-xs font-medium">Restaurant menu</span><h1 className="mt-3 font-display text-4xl font-extrabold leading-tight">{r.name}</h1><p className="mt-1 text-white/70">{r.tagline || r.description}</p></div><svg viewBox="0 0 120 120" className="size-24 shrink-0" aria-hidden="true">{[44, 60, 76].map((x) => <path key={x} className="steam" d={`M${x} 46 q-7 -9 0 -17 q7 -8 0 -16`} fill="none" stroke="#ffb627" strokeWidth="4" strokeLinecap="round" />)}<path d="M25 55 h70 v10 a35 35 0 0 1 -35 35 a35 35 0 0 1 -35 -35z" fill="#ffb627" /><path d="M95 62 h6 a12 12 0 0 1 0 24 h-10" fill="none" stroke="#ffb627" strokeWidth="6" /><ellipse cx="60" cy="104" rx="44" ry="6" fill="#1f6f5b" /></svg></div>
+      <div className="mt-5 flex flex-wrap gap-2 text-sm">{r.rating != null && <span className="rounded-full bg-white/10 px-3 py-1.5">★ {r.rating}</span>}{r.eta && <span className="rounded-full bg-white/10 px-3 py-1.5">◷ {r.eta}</span>}{r.area && <span className="rounded-full bg-white/10 px-3 py-1.5">⌖ {r.area}</span>}</div>
+      {(r.hours || r.phone || r.address) && <div className="mt-3 space-y-1 text-xs text-white/60">{r.hours && <p>{r.hours}</p>}{r.address && <p>{r.address}</p>}{r.phone && <p>{r.phone}</p>}</div>}
     </header>
   );
 }
