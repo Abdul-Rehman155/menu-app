@@ -68,14 +68,14 @@ The seed script creates Chai Corner only when missing. It never resets an existi
 
 ## Main routes
 
-- `/` or `/r/:slug` — public restaurant menu and checkout
+- `/` or `/r/:slug` — default public menu; `/:slug` also opens a business storefront
 - `/owner` — owner login, registration, orders, menu, and settings
 - `/admin` — provisioned super admin sign-in and restaurant activation
 - `GET /api/health` — API/database health
 - `GET /api/r/:slug` — public active restaurant menu
 - `POST /api/r/:slug/orders` — validate and persist an order; server calculates price
 - `/api/owner/*` — authenticated owner data and order management
-- `/api/admin/*` — super admin-only platform endpoints
+- `/api/admin/*` — super admin-only business, owner, plan, platform-setting, and audit endpoints
 
 Customer order submission uses cash as the payment method and leaves payment pending. An order is not represented as accepted until the restaurant owner changes its status. WhatsApp sharing is optional and separate from saving an order.
 
@@ -83,7 +83,7 @@ Customer order submission uses cash as the payment method and leaves payment pen
 
 1. Create MongoDB Atlas database credentials and allow network access from the backend host.
 2. Deploy `server/` as the `menu-app-api` Node service, set `MONGO_URI`, a random `JWT_SECRET` of at least 32 characters, `CORS_ORIGINS`, and `NODE_ENV=production`, then use `npm start`.
-3. Add `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in Render to enable image uploads. Images are validated and uploaded from memory to Cloudinary; Render disk is not used for permanent storage.
+3. In Cloudinary, open **Console → Settings → Access Keys** to find the cloud name, API key, and API secret. Add them as `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the Render backend service environment. Keep all three server-side; never add them to Vite/Vercel variables. Images are validated and uploaded from memory to Cloudinary; Render disk is not used for permanent storage.
 4. Deploy the repository root to Vercel with `npm run build` and set `VITE_API_URL=https://menu-app-api-i3ap.onrender.com`. Configure SPA fallback routing for `/owner`, `/admin`, and `/r/*`.
 5. Run the seed command once with protected owner/admin values in the backend environment. Do not expose these values in frontend environment variables.
 6. Verify `/api/health`, sign in, place a small test order, and check that a different owner cannot retrieve it.
@@ -101,17 +101,19 @@ Customer order submission uses cash as the payment method and leaves payment pen
 - [x] Restaurant open/closed, hours, minimum order, taxes, delivery settings, and owner profile management
 - [x] Tenant-scoped customer history and date-filtered CSV sales reports
 - [x] Server-calculated tax/delivery totals and minimum-order/open-status checks at checkout
-- [x] Super admin login gate, restaurant overview, listing, activate/suspend endpoints and panel
+- [x] Super admin login gate, business overview, listing, activate/suspend, and owner-account controls
+- [x] Admin-configurable subscription plan prices, feature flags, and usage limits; plan assignment and audit log
+- [x] Platform settings for owner registration and maintenance-mode configuration
 - [x] Non-destructive demo seed, deployment notes, env example, and secret ignore rules
-- [ ] Subscription plan configuration and backend plan-limit enforcement
+- [x] Subscription plan configuration and backend plan-limit enforcement
 - [ ] Payment provider integration (requires provider credentials and verified webhooks)
 - [ ] Configure Cloudinary credentials before enabling image uploads in a deployment
 - [ ] QR generation/download and print layout
-- [ ] Admin audit logs and authorized admin account management
+- [x] Admin audit logs and authorized owner account management
 - [x] Automated API tests for CORS, auth/roles, tenant scoping, customer order pricing, uploads, and menu saves
 - [ ] Full database-backed integration tests, API schema docs, and deployed service verification
 - [x] Helmet security headers and bounded express-rate-limit middleware for API and authentication routes
 - [ ] A shared rate-limit store for horizontal scaling; the current limiter uses per-process memory and is appropriate only while running a single backend instance.
-- [ ] Dedicated Category, Subscription, Payment, AuditLog, and PlatformSettings models/APIs, admin audit logs, and API schema documentation.
+- [x] Subscription, AuditLog, and PlatformSettings models/APIs. Category normalization and API schema documentation remain future work.
 
-Do not consider the platform launch-ready until the incomplete product capabilities above are addressed, a shared rate-limit store is configured before scaling beyond one backend instance, and deployed database, upload, and order flows are verified.
+Payment collection is not implemented: plan prices are configuration only, with no billing provider or webhook handling. QR generation and full DB-backed/deployed verification also remain open. The current rate limiter stores counts in process memory, so use a shared store before scaling beyond one backend instance. Maintenance mode blocks public and owner API traffic, while preserving health checks, admin control, and admin login. Its setting is cached for up to 15 seconds.

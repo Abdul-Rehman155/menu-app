@@ -1,74 +1,47 @@
-import { useCallback, useEffect, useState } from "react";
+﻿import { useCallback, useEffect, useState } from "react";
 import { request } from "../services/api.js";
 
 export default function AdminPanel() {
   const [token, setToken] = useState(() => localStorage.getItem("platformToken") || "");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [data, setData] = useState(null);
-  const [restaurants, setRestaurants] = useState([]);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const clearSession = () => {
-    localStorage.removeItem("platformToken");
-    setToken("");
-    setData(null);
-    setRestaurants([]);
-  };
-
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const [data, setData] = useState(null); const [restaurants, setRestaurants] = useState([]); const [owners, setOwners] = useState([]);
+  const [plans, setPlans] = useState([]); const [settings, setSettings] = useState([]); const [auditLogs, setAuditLogs] = useState([]);
+  const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const clearSession = () => { localStorage.removeItem("platformToken"); setToken(""); setData(null); setRestaurants([]); };
   const fetchAll = useCallback(async (jwt) => {
-    setBusy(true);
-    setError("");
+    setBusy(true); setError("");
     try {
-      const [summary, list] = await Promise.all([
-        request("/api/admin/overview", { token: jwt }),
-        request("/api/admin/restaurants", { token: jwt }),
+      const [summary, list, ownerList, planList, settingsData, auditData] = await Promise.all([
+        request("/api/admin/overview", { token: jwt }), request("/api/admin/restaurants", { token: jwt }),
+        request("/api/admin/owners", { token: jwt }), request("/api/admin/subscription-plans", { token: jwt }),
+        request("/api/admin/settings", { token: jwt }), request("/api/admin/audit-logs?limit=20", { token: jwt }),
       ]);
-      setData(summary);
-      setRestaurants(list.restaurants);
-    } catch (fetchError) {
-      setError(fetchError.message);
-      if (fetchError.status === 401) clearSession();
-    } finally {
-      setBusy(false);
-    }
+      setData(summary); setRestaurants(list.restaurants); setOwners(ownerList.owners); setPlans(planList.plans); setSettings(settingsData.settings); setAuditLogs(auditData.logs);
+    } catch (e) { setError(e.message); if (e.status === 401) clearSession(); }
+    finally { setBusy(false); }
   }, []);
-
-  useEffect(() => {
-    if (token) fetchAll(token);
-  }, [token, fetchAll]);
-
+  useEffect(() => { if (token) fetchAll(token); }, [token, fetchAll]);
+  const mutate = async (path, method, body) => {
+    setBusy(true); setError("");
+    try { await request(path, { token, method, body: JSON.stringify(body) }); await fetchAll(token); }
+    catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
   const login = async (event) => {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const result = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
-      if (result.user.role !== "super_admin") throw new Error("This account does not have platform administrator access");
-      localStorage.setItem("platformToken", result.token);
-      setToken(result.token);
-    } catch (loginError) {
-      setError(loginError.message);
-    } finally {
-      setBusy(false);
-    }
+    event.preventDefault(); setBusy(true); setError("");
+    try { const result = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }); if (result.user.role !== "super_admin") throw new Error("This account does not have platform administrator access"); localStorage.setItem("platformToken", result.token); setToken(result.token); }
+    catch (e) { setError(e.message); } finally { setBusy(false); }
   };
-
-  const changeStatus = async (id, status) => {
-    setBusy(true);
-    setError("");
-    try {
-      await request(`/api/admin/restaurants/${id}/status`, { token, method: "PATCH", body: JSON.stringify({ status }) });
-      await fetchAll(token);
-    } catch (statusError) {
-      setError(statusError.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (!token) return <div className="grid min-h-screen place-items-center bg-mist p-5"><form onSubmit={login} className="w-full max-w-md rounded-3xl bg-white p-8"><a href="/" className="text-sm text-leaf">← Menu</a><p className="mt-8 text-xs font-bold uppercase tracking-widest text-rose">Platform control</p><h1 className="mt-2 font-display text-3xl font-bold">Super admin</h1><p className="mt-2 text-sm text-ink/60">Sign in with a provisioned administrator account.</p><input required type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" className="mt-5 w-full rounded-xl border border-line px-4 py-3" /><input required type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className="mt-3 w-full rounded-xl border border-line px-4 py-3" />{error && <p role="alert" className="mt-3 text-sm text-rose">{error}</p>}<button disabled={busy} className="mt-4 w-full rounded-xl bg-ink py-3 font-semibold text-white">{busy ? "Signing in…" : "Sign in"}</button></form></div>;
-
-  return <main className="min-h-screen bg-mist p-5 md:p-10"><header className="mx-auto flex max-w-6xl items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-rose">Platform control</p><h1 className="mt-1 font-display text-3xl font-bold">Super admin</h1></div><button onClick={clearSession} className="rounded-xl border border-line bg-white px-4 py-2">Sign out</button></header>{error && <p role="alert" className="mx-auto mt-4 max-w-6xl text-sm text-rose">{error}</p>}{busy && !data && <p role="status" className="mx-auto mt-6 max-w-6xl text-sm text-ink/60">Loading platform data…</p>}{data && <div className="mx-auto mt-7 grid max-w-6xl gap-3 sm:grid-cols-2 xl:grid-cols-4">{[["Restaurants", data.totalRestaurants], ["Active", data.activeRestaurants], ["Suspended", data.suspendedRestaurants], ["Orders", data.totalOrders]].map(([label, value]) => <article key={label} className="rounded-2xl bg-white p-5"><p className="text-sm text-ink/60">{label}</p><p className="mt-2 font-display text-3xl font-bold">{value}</p></article>)}</div>}<section className="mx-auto mt-7 max-w-6xl rounded-2xl bg-white p-5"><h2 className="font-bold">Restaurants</h2><div className="mt-3 divide-y divide-line">{restaurants.map((r) => <div key={r._id} className="flex flex-wrap items-center justify-between gap-3 py-4"><div><p className="font-semibold">{r.name} <span className="font-normal text-ink/50">/{r.slug}</span></p><p className="mt-1 text-xs capitalize text-ink/55">{r.status} · {r.plan} plan · {r.subscriptionStatus}</p></div><button disabled={busy} onClick={() => changeStatus(r._id, r.status === "active" ? "suspended" : "active")} className="rounded-lg border border-line px-3 py-2 text-sm disabled:opacity-50">{r.status === "active" ? "Suspend" : "Activate"}</button></div>)}{data && restaurants.length === 0 && <p className="py-6 text-sm text-ink/55">No restaurants found.</p>}</div></section></main>;
+  const updatePlan = (key, update) => setPlans((list) => list.map((plan) => plan.key === key ? { ...plan, ...update } : plan));
+  const updateLimit = (plan, key, value) => updatePlan(plan.key, { limits: { ...plan.limits, [key]: value === "" ? null : Number(value) } });
+  return <main className="min-h-screen bg-mist p-5 md:p-10"><header className="mx-auto flex max-w-6xl items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-rose">Platform control</p><h1 className="mt-1 font-display text-3xl font-bold">Super admin</h1></div><button onClick={clearSession} className="rounded-xl border border-line bg-white px-4 py-2">Sign out</button></header>
+    {error && <p role="alert" className="mx-auto mt-4 max-w-6xl text-sm text-rose">{error}</p>}{busy && !data && <p role="status" className="mx-auto mt-6 max-w-6xl text-sm text-ink/60">Loading platform data…</p>}
+    {data && <div className="mx-auto mt-7 grid max-w-6xl gap-3 sm:grid-cols-2 xl:grid-cols-3">{[["Businesses", data.totalRestaurants], ["Active", data.activeRestaurants], ["Suspended", data.suspendedRestaurants], ["Orders", data.totalOrders], ["Owners", data.totalOwners], ["Orders this month", data.monthlyOrders]].map(([label, value]) => <article key={label} className="rounded-2xl bg-white p-5"><p className="text-sm text-ink/60">{label}</p><p className="mt-2 font-display text-3xl font-bold">{value}</p></article>)}</div>}
+    <section className="mx-auto mt-7 max-w-6xl rounded-2xl bg-white p-5"><h2 className="font-bold">Businesses</h2><div className="mt-3 divide-y divide-line">{restaurants.map((r) => <div key={r._id} className="flex flex-wrap items-center justify-between gap-3 py-4"><div><p className="font-semibold">{r.name} <span className="font-normal text-ink/50">/{r.slug}</span></p><p className="mt-1 text-xs capitalize text-ink/55">{r.businessType || "restaurant"} · {r.status} · {r.plan} plan · {r.subscriptionStatus}</p><div className="mt-2 flex flex-wrap gap-2"><select aria-label={`Plan for ${r.name}`} className="rounded-lg border border-line px-2 py-1 text-sm" value={r.plan || "free"} onChange={(e) => setRestaurants((rows) => rows.map((row) => row._id === r._id ? { ...row, plan: e.target.value } : row))}>{plans.map((plan) => <option key={plan.key} value={plan.key}>{plan.name}</option>)}</select><select aria-label={`Subscription for ${r.name}`} className="rounded-lg border border-line px-2 py-1 text-sm" value={r.subscriptionStatus || "trialing"} onChange={(e) => setRestaurants((rows) => rows.map((row) => row._id === r._id ? { ...row, subscriptionStatus: e.target.value } : row))}>{["trialing", "active", "past_due", "cancelled"].map((status) => <option key={status}>{status}</option>)}</select><button disabled={busy} onClick={() => mutate(`/api/admin/restaurants/${r._id}/subscription`, "PATCH", { plan: r.plan, subscriptionStatus: r.subscriptionStatus })} className="rounded-lg bg-ink px-3 py-1 text-sm text-white">Save plan</button></div></div><button disabled={busy} onClick={() => mutate(`/api/admin/restaurants/${r._id}/status`, "PATCH", { status: r.status === "active" ? "suspended" : "active" })} className="rounded-lg border border-line px-3 py-2 text-sm">{r.status === "active" ? "Suspend" : "Activate"}</button></div>)}{data && restaurants.length === 0 && <p className="py-6 text-sm text-ink/55">No businesses found.</p>}</div></section>
+    <section className="mx-auto mt-6 max-w-6xl rounded-2xl bg-white p-5"><h2 className="font-bold">Owner accounts</h2><div className="divide-y divide-line">{owners.map((owner) => <div key={owner._id} className="flex items-center justify-between gap-3 py-3"><div><p className="font-semibold">{owner.name}</p><p className="text-sm text-ink/55">{owner.email}</p></div><button disabled={busy} onClick={() => mutate(`/api/admin/owners/${owner._id}/status`, "PATCH", { active: !owner.active })} className="rounded-lg border border-line px-3 py-2 text-sm">{owner.active ? "Disable" : "Enable"}</button></div>)}</div></section>
+    <section className="mx-auto mt-6 max-w-6xl rounded-2xl bg-white p-5"><h2 className="font-bold">Subscription plans</h2><p className="mt-1 text-sm text-ink/55">Configure limits and prices. Payment collection is not connected.</p><div className="mt-4 grid gap-3 md:grid-cols-2">{plans.map((plan) => <article key={plan.key} className="rounded-xl border border-line p-4"><label className="text-sm">Plan name<input className="mt-1 w-full rounded-lg border border-line px-3 py-2" value={plan.name} onChange={(e) => updatePlan(plan.key, { name: e.target.value })} /></label><label className="mt-3 block text-sm">Price<input type="number" min="0" step="0.01" className="mt-1 w-full rounded-lg border border-line px-3 py-2" value={plan.price ?? ""} placeholder="Unpriced" onChange={(e) => updatePlan(plan.key, { price: e.target.value === "" ? null : Number(e.target.value) })} /></label><div className="mt-3 grid grid-cols-2 gap-2">{[["maxCategories", "Categories"], ["maxProducts", "Products"], ["maxMonthlyOrders", "Monthly orders"]].map(([key, label]) => <label key={key} className="text-xs">{label}<input type="number" min="0" className="mt-1 w-full rounded-lg border border-line px-2 py-2" value={plan.limits[key] ?? ""} placeholder="Unlimited" onChange={(e) => updateLimit(plan, key, e.target.value)} /></label>)}</div><div className="mt-3 flex flex-wrap gap-3">{Object.entries({ imageUploads: "Images", analytics: "Analytics", reports: "Reports" }).map(([key, label]) => <label key={key} className="flex items-center gap-1 text-xs"><input type="checkbox" checked={plan.features[key]} onChange={(e) => updatePlan(plan.key, { features: { ...plan.features, [key]: e.target.checked } })} />{label}</label>)}</div><button disabled={busy} onClick={() => mutate(`/api/admin/subscription-plans/${plan.key}`, "PUT", plan)} className="mt-4 rounded-lg bg-ink px-3 py-2 text-sm text-white">Save {plan.name}</button></article>)}</div></section>
+    <section className="mx-auto mt-6 max-w-6xl rounded-2xl bg-white p-5"><h2 className="font-bold">Platform settings</h2><div className="mt-3 flex flex-wrap gap-3">{settings.filter((setting) => typeof setting.value === "boolean").map((setting) => <label key={setting.key} className="flex items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm"><input type="checkbox" checked={setting.value} disabled={busy} onChange={(e) => mutate(`/api/admin/settings/${setting.key}`, "PATCH", { value: e.target.checked })} />{setting.key === "ownerRegistrationEnabled" ? "Owner registration enabled" : "Maintenance mode"}</label>)}</div></section>
+    <section className="mx-auto mt-6 max-w-6xl rounded-2xl bg-white p-5"><h2 className="font-bold">Recent admin activity</h2><div className="mt-3 divide-y divide-line">{auditLogs.map((log) => <div key={log._id} className="py-2 text-sm"><span className="font-semibold">{log.action}</span><span className="ml-2 text-ink/50">{new Date(log.createdAt).toLocaleString()}</span></div>)}{!auditLogs.length && <p className="py-3 text-sm text-ink/50">No admin activity recorded yet.</p>}</div></section>
+  </main>;
 }

@@ -13,9 +13,13 @@ import { resolveMongoUri } from "./config/mongo-uri.js";
 import { hasCloudinaryConfig, uploadImageBuffer } from "./config/cloudinary.js";
 import { uploadImage, validateImageBuffer } from "./middleware/image-upload.js";
 import { sendUploadError } from "./middleware/upload-error.js";
+import { defaultPlans, getPlanDefinition } from "./config/plans.js";
 import Restaurant from "./models/Restaurant.js";
 import User from "./models/User.js";
 import Order from "./models/Order.js";
+import SubscriptionPlan from "./models/SubscriptionPlan.js";
+import PlatformSetting from "./models/PlatformSetting.js";
+import AuditLog from "./models/AuditLog.js";
 
 const required = ["MONGO_URI", "JWT_SECRET"];
 for (const key of required) if (!process.env[key] && !(key === "JWT_SECRET" && process.env.NODE_ENV !== "production")) throw new Error(`${key} missing from server environment`);
@@ -78,7 +82,7 @@ const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next
 const safeRestaurant = (r) => { const o = r.toObject(); delete o.passwordHash; return o; };
 const publicRestaurant = (r) => {
   const source = r.toObject();
-  const fields = ["slug", "name", "tagline", "description", "area", "address", "rating", "eta", "hours", "openingTime", "closingTime", "whatsapp", "phone", "email", "logo", "coverImage", "currency", "deliveryFee", "minOrderAmount", "taxPercent", "deliveryEnabled", "pickupEnabled", "dineInEnabled", "isOpen", "menu"];
+  const fields = ["slug", "businessType", "name", "tagline", "description", "area", "address", "rating", "eta", "hours", "openingTime", "closingTime", "whatsapp", "phone", "email", "logo", "coverImage", "currency", "deliveryFee", "minOrderAmount", "taxPercent", "deliveryEnabled", "pickupEnabled", "dineInEnabled", "isOpen", "menu"];
   return Object.fromEntries(fields.map((field) => [field, source[field]]));
 };
 const auth = asyncRoute(async (req, res, next) => {
@@ -103,27 +107,50 @@ const ownedRestaurant = asyncRoute(async (req, res, next) => {
 const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const pageParams = (req) => ({ page: Math.max(1, Number.parseInt(req.query.page, 10) || 1), limit: Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20)) });
 const orderStatuses = ["pending", "confirmed", "preparing", "ready", "out_for_delivery", "completed", "cancelled"];
+const getBusinessPlan = async (business) => {
+  const aliases = { starter: "basic", pro: "professional" };
+  const key = aliases[business.plan] || business.plan || "free";
+  const configured = await SubscriptionPlan.findOne({ key }).lean();
+  return getPlanDefinition(key, configured);
+};
+const writeAuditLog = async (req, { action, targetType, targetId = "", restaurantId, details = {} }) => {
+  try { await AuditLog.create({ actorId: req.user._id, action, targetType, targetId: String(targetId), restaurantId, details }); }
+  catch (error) { console.error("Audit log write failed:", error.name || "Error", error.code || ""); }
+};
 
 app.get("/", (_req, res) => res.json({ ok: true, service: "restaurant-saas-api" }));
 app.get("/api/health", (_req, res) => {
   const connected = mongoose.connection.readyState === 1;
   res.status(connected ? 200 : 503).json({ ok: connected, service: "restaurant-saas-api", database: connected ? "connected" : "disconnected" });
 });
+let maintenanceCache = { enabled: false, expiresAt: 0 };
+app.use("/api", asyncRoute(async (req, res, next) => {
+  if (req.path.startsWith("/admin") || req.path === "/auth/login" || req.path === "/health") return next();
+  if (Date.now() >= maintenanceCache.expiresAt) {
+    const setting = await PlatformSetting.findOne({ key: "maintenanceMode" }).lean();
+    maintenanceCache = { enabled: setting?.value === true, expiresAt: Date.now() + 15_000 };
+  }
+  if (maintenanceCache.enabled) return res.status(503).json({ error: "The platform is temporarily unavailable for maintenance" });
+  next();
+}));
 
 app.post("/api/auth/register", asyncRoute(async (req, res) => {
+  const registrationSetting = await PlatformSetting.findOne({ key: "ownerRegistrationEnabled" }).lean();
+  if (registrationSetting?.value === false) return res.status(403).json({ error: "New business registration is currently closed" });
   const { name, email, password, restaurantName, slug } = req.body || {};
+  const businessType = req.body?.businessType || "restaurant";
   const cleanName = typeof name === "string" ? name.trim() : "";
   const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
   const cleanPassword = typeof password === "string" ? password : "";
   const cleanRestaurantName = typeof restaurantName === "string" ? restaurantName.trim() : "";
   const safeSlug = String(slug || "").trim().toLowerCase();
-  if (!cleanName || cleanName.length > 100 || !/^\S+@\S+\.\S+$/.test(cleanEmail) || cleanEmail.length > 254 || cleanPassword.length < 10 || cleanPassword.length > 128 || !cleanRestaurantName || cleanRestaurantName.length > 120 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(safeSlug)) return res.status(400).json({ error: "Provide a name, valid email, password (10–128 characters), restaurant name, and a URL-friendly unique slug" });
+  if (!cleanName || cleanName.length > 100 || !/^\S+@\S+\.\S+$/.test(cleanEmail) || cleanEmail.length > 254 || cleanPassword.length < 10 || cleanPassword.length > 128 || !cleanRestaurantName || cleanRestaurantName.length > 120 || !["restaurant", "shop"].includes(businessType) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(safeSlug)) return res.status(400).json({ error: "Provide valid owner and business details, a password (10–128 characters), business type, and a URL-friendly unique slug" });
   if (await User.exists({ email: cleanEmail })) return res.status(409).json({ error: "An account already exists for that email" });
   if (await Restaurant.exists({ slug: safeSlug })) return res.status(409).json({ error: "That restaurant URL is already taken" });
   const session = await mongoose.startSession();
   let result;
   try { await session.withTransaction(async () => {
-    const restaurant = await Restaurant.create([{ slug: safeSlug, name: restaurantName.trim(), ownerId: new mongoose.Types.ObjectId() }], { session });
+    const restaurant = await Restaurant.create([{ slug: safeSlug, name: cleanRestaurantName, businessType, ownerId: new mongoose.Types.ObjectId() }], { session });
     const user = await User.create([{ name: cleanName, email: cleanEmail, passwordHash: await bcrypt.hash(cleanPassword, 12), restaurantId: restaurant[0]._id }], { session });
     restaurant[0].ownerId = user[0]._id; await restaurant[0].save({ session }); result = { user: user[0], restaurant: restaurant[0] };
   }); } finally { await session.endSession(); }
@@ -186,6 +213,12 @@ app.post("/api/r/:slug/orders", asyncRoute(async (req, res) => {
   }
   const deliveryFee = fulfillment === "delivery" ? Number(restaurant.deliveryFee || 0) : 0;
   if (subtotal < Number(restaurant.minOrderAmount || 0)) return res.status(400).json({ error: `Minimum order is ${restaurant.currency} ${restaurant.minOrderAmount}` });
+  const plan = await getBusinessPlan(restaurant);
+  if (plan.limits.maxMonthlyOrders != null) {
+    const monthStart = new Date(); monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
+    const monthlyOrders = await Order.countDocuments({ restaurantId: restaurant._id, createdAt: { $gte: monthStart } });
+    if (monthlyOrders >= plan.limits.maxMonthlyOrders) return res.status(409).json({ error: "This business has reached its monthly order limit" });
+  }
   const taxPercent = Number(restaurant.taxPercent || 0);
   const taxAmount = Number((subtotal * taxPercent / 100).toFixed(2));
   const orderNumber = `CC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -205,10 +238,17 @@ app.patch("/api/owner/restaurant", auth, owner, ownedRestaurant, asyncRoute(asyn
 }));
 app.put("/api/owner/menu", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   if (!Array.isArray(req.body.menu) || req.body.menu.length > 100) return res.status(400).json({ error: "Menu must contain at most 100 categories" });
+  const productCount = req.body.menu.reduce((count, category) => count + (Array.isArray(category?.items) ? category.items.length : 0), 0);
+  if (productCount > 2000) return res.status(400).json({ error: "Menu must contain at most 2,000 products" });
+  const plan = await getBusinessPlan(req.restaurant);
+  if (plan.limits.maxCategories != null && req.body.menu.length > plan.limits.maxCategories) return res.status(403).json({ error: `Your ${plan.name} plan allows up to ${plan.limits.maxCategories} categories` });
+  if (plan.limits.maxProducts != null && productCount > plan.limits.maxProducts) return res.status(403).json({ error: `Your ${plan.name} plan allows up to ${plan.limits.maxProducts} products` });
   req.restaurant.menu = req.body.menu; await req.restaurant.save(); res.json({ menu: req.restaurant.menu });
 }));
 app.post("/api/owner/uploads", auth, owner, ownedRestaurant, uploadImage.single("file"), asyncRoute(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Select a JPEG, PNG, or WebP image to upload" });
+  const plan = await getBusinessPlan(req.restaurant);
+  if (!plan.features.imageUploads) return res.status(403).json({ error: `Image uploads are not included in the ${plan.name} plan` });
   if (!hasCloudinaryConfig()) return res.status(503).json({ error: "Image uploads are not configured on this server. Add the Cloudinary credentials in the backend environment." });
   if (!validateImageBuffer(req.file.buffer, req.file.mimetype)) return res.status(400).json({ error: "Image contents do not match the selected JPEG, PNG, or WebP file type" });
   let uploaded;
@@ -248,6 +288,8 @@ app.patch("/api/owner/orders/:id/status", auth, owner, ownedRestaurant, asyncRou
   order.status = status; order.statusHistory.push({ status, by: req.user._id, note: String(req.body.reason || req.body.note || "").trim().slice(0, 300) }); await order.save(); res.json({ order });
 }));
 app.get("/api/owner/analytics", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
+  const plan = await getBusinessPlan(req.restaurant);
+  if (!plan.features.analytics) return res.status(403).json({ error: `Analytics are not included in the ${plan.name} plan` });
   const restaurantId = new mongoose.Types.ObjectId(req.user.restaurantId); const now = new Date();
   const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -279,6 +321,8 @@ app.get("/api/owner/customers", auth, owner, ownedRestaurant, asyncRoute(async (
   res.json({ customers: rows, page, limit, total: count[0]?.total || 0 });
 }));
 app.get("/api/owner/reports", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
+  const plan = await getBusinessPlan(req.restaurant);
+  if (!plan.features.reports) return res.status(403).json({ error: `Reports are not included in the ${plan.name} plan` });
   const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 30 * 86400000); const to = req.query.to ? new Date(req.query.to) : new Date();
   if (Number.isNaN(from.valueOf()) || Number.isNaN(to.valueOf()) || from > to || to - from > 366 * 86400000) return res.status(400).json({ error: "Choose a valid date range up to 366 days" });
   to.setUTCHours(23, 59, 59, 999);
@@ -291,16 +335,117 @@ app.get("/api/owner/reports", auth, owner, ownedRestaurant, asyncRoute(async (re
   res.json({ from, to, summary: summary[0] || { totalOrders: 0, revenue: 0, subtotal: 0, tax: 0, delivery: 0 }, sales, bestSellers });
 }));
 app.get("/api/admin/overview", auth, admin, asyncRoute(async (_req, res) => {
-  const [total, active, suspended, orders] = await Promise.all([Restaurant.countDocuments(), Restaurant.countDocuments({ status: "active" }), Restaurant.countDocuments({ status: "suspended" }), Order.countDocuments()]); res.json({ totalRestaurants: total, activeRestaurants: active, suspendedRestaurants: suspended, totalOrders: orders });
+  const monthStart = new Date(); monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
+  const [total, active, suspended, totalOwners, orders, monthlyOrders] = await Promise.all([Restaurant.countDocuments(), Restaurant.countDocuments({ status: "active" }), Restaurant.countDocuments({ status: "suspended" }), User.countDocuments({ role: "owner" }), Order.countDocuments(), Order.countDocuments({ createdAt: { $gte: monthStart } })]);
+  res.json({ totalRestaurants: total, activeRestaurants: active, suspendedRestaurants: suspended, totalOwners, totalOrders: orders, monthlyOrders });
 }));
 app.get("/api/admin/restaurants", auth, admin, asyncRoute(async (req, res) => {
-  const { page, limit } = pageParams(req); const q = escapeRegex(String(req.query.search || "").slice(0, 60)); const filter = q ? { $or: [{ name: { $regex: q, $options: "i" } }, { slug: { $regex: q, $options: "i" } }] } : {};
+  const { page, limit } = pageParams(req); const q = escapeRegex(String(req.query.search || "").slice(0, 60)); const filter = {};
+  if (q) filter.$or = [{ name: { $regex: q, $options: "i" } }, { slug: { $regex: q, $options: "i" } }];
+  if (["active", "suspended"].includes(req.query.status)) filter.status = req.query.status;
+  if (["restaurant", "shop"].includes(req.query.businessType)) filter.businessType = req.query.businessType;
   const [restaurants, total] = await Promise.all([Restaurant.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), Restaurant.countDocuments(filter)]); res.json({ restaurants, page, limit, total });
 }));
 app.patch("/api/admin/restaurants/:id/status", auth, admin, asyncRoute(async (req, res) => {
   if (!["active", "suspended"].includes(req.body?.status)) return res.status(400).json({ error: "Status must be active or suspended" });
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid restaurant ID" });
-  const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true, runValidators: true }); if (!restaurant) return res.status(404).json({ error: "Restaurant not found" }); res.json({ restaurant: safeRestaurant(restaurant) });
+  const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true, runValidators: true }); if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+  await writeAuditLog(req, { action: `business.${req.body.status}`, targetType: "restaurant", targetId: restaurant.id, restaurantId: restaurant._id });
+  res.json({ restaurant: safeRestaurant(restaurant) });
+}));
+
+app.get("/api/admin/owners", auth, admin, asyncRoute(async (req, res) => {
+  const { page, limit } = pageParams(req); const q = escapeRegex(String(req.query.search || "").trim().slice(0, 60));
+  const filter = { role: "owner" };
+  if (req.query.status === "active") filter.active = true;
+  if (req.query.status === "disabled") filter.active = false;
+  if (q) filter.$or = [{ name: { $regex: q, $options: "i" } }, { email: { $regex: q, $options: "i" } }];
+  const [owners, total] = await Promise.all([User.find(filter).select("name email active restaurantId createdAt").sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), User.countDocuments(filter)]);
+  res.json({ owners, page, limit, total });
+}));
+app.patch("/api/admin/owners/:id/status", auth, admin, asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid owner ID" });
+  if (typeof req.body?.active !== "boolean") return res.status(400).json({ error: "active must be true or false" });
+  const user = await User.findOneAndUpdate({ _id: req.params.id, role: "owner" }, { active: req.body.active }, { new: true, runValidators: true }).select("name email active restaurantId");
+  if (!user) return res.status(404).json({ error: "Owner account not found" });
+  await writeAuditLog(req, { action: req.body.active ? "owner.activated" : "owner.suspended", targetType: "user", targetId: user.id, restaurantId: user.restaurantId });
+  res.json({ owner: { id: user.id, name: user.name, email: user.email, active: user.active, restaurantId: user.restaurantId } });
+}));
+
+app.get("/api/admin/subscription-plans", auth, admin, asyncRoute(async (_req, res) => {
+  const configured = await SubscriptionPlan.find({}).lean();
+  const byKey = new Map(configured.map((plan) => [plan.key, plan]));
+  const plans = defaultPlans.map((plan) => getPlanDefinition(plan.key, byKey.get(plan.key)));
+  for (const plan of configured) if (!plans.some((entry) => entry.key === plan.key)) plans.push(plan);
+  res.json({ plans: plans.sort((a, b) => a.sortOrder - b.sortOrder) });
+}));
+app.put("/api/admin/subscription-plans/:key", auth, admin, asyncRoute(async (req, res) => {
+  const aliases = { starter: "basic", pro: "professional" };
+  const key = aliases[req.params.key] || req.params.key;
+  const base = defaultPlans.find((plan) => plan.key === key);
+  if (!base) return res.status(404).json({ error: "Subscription plan not found" });
+  const body = req.body || {};
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const price = body.price === null ? null : Number(body.price);
+  const currency = String(body.currency || base.currency).toUpperCase();
+  const billingCycle = body.billingCycle || base.billingCycle;
+  const sortOrder = Number(body.sortOrder ?? base.sortOrder);
+  const validLimit = (value) => value === null || (Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000);
+  const limits = body.limits || base.limits; const features = body.features || base.features;
+  if (!name || name.length > 80 || (price !== null && (!Number.isFinite(price) || price < 0)) || !/^[A-Z]{3}$/.test(currency) || !["monthly", "yearly"].includes(billingCycle) || !Number.isSafeInteger(sortOrder) || sortOrder < 0 || !limits || !validLimit(limits.maxCategories ?? null) || !validLimit(limits.maxProducts ?? null) || !validLimit(limits.maxMonthlyOrders ?? null) || !features || ["imageUploads", "analytics", "reports"].some((key) => typeof features[key] !== "boolean")) return res.status(400).json({ error: "Provide a valid plan name, price, currency, billing cycle, limits, and feature flags" });
+  const value = { key, name, description: String(body.description || "").trim().slice(0, 500), price, currency, billingCycle, active: typeof body.active === "boolean" ? body.active : base.active, sortOrder, limits: { maxCategories: limits.maxCategories ?? null, maxProducts: limits.maxProducts ?? null, maxMonthlyOrders: limits.maxMonthlyOrders ?? null }, features: { imageUploads: features.imageUploads, analytics: features.analytics, reports: features.reports } };
+  const plan = await SubscriptionPlan.findOneAndUpdate({ key }, { $set: value }, { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true });
+  await writeAuditLog(req, { action: "subscription_plan.updated", targetType: "subscription_plan", targetId: key, details: { name, active: value.active } });
+  res.json({ plan });
+}));
+app.patch("/api/admin/restaurants/:id/subscription", auth, admin, asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid restaurant ID" });
+  const aliases = { starter: "basic", pro: "professional" };
+  const planKey = aliases[req.body?.plan] || req.body?.plan;
+  if (!defaultPlans.some((plan) => plan.key === planKey)) return res.status(400).json({ error: "Choose a known subscription plan" });
+  if (!(["trialing", "active", "past_due", "cancelled"].includes(req.body?.subscriptionStatus))) return res.status(400).json({ error: "Invalid subscription status" });
+  const configured = await SubscriptionPlan.findOne({ key: planKey }).lean();
+  if (configured?.active === false) return res.status(409).json({ error: "That subscription plan is inactive" });
+  const start = req.body.subscriptionStartedAt ? new Date(req.body.subscriptionStartedAt) : new Date();
+  const expiry = req.body.subscriptionExpiresAt ? new Date(req.body.subscriptionExpiresAt) : null;
+  if (Number.isNaN(start.valueOf()) || (expiry && (Number.isNaN(expiry.valueOf()) || expiry <= start))) return res.status(400).json({ error: "Subscription dates are invalid" });
+  const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { plan: planKey, subscriptionStatus: req.body.subscriptionStatus, subscriptionStartedAt: start, subscriptionExpiresAt: expiry }, { new: true, runValidators: true });
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+  await writeAuditLog(req, { action: "subscription.assigned", targetType: "restaurant", targetId: restaurant.id, restaurantId: restaurant._id, details: { plan: planKey, status: restaurant.subscriptionStatus } });
+  res.json({ restaurant: safeRestaurant(restaurant), paymentIntegration: "not_configured" });
+}));
+
+const platformSettingDefaults = [
+  { key: "platformName", value: "Business Platform" },
+  { key: "supportEmail", value: "" },
+  { key: "defaultCurrency", value: "USD" },
+  { key: "ownerRegistrationEnabled", value: true },
+  { key: "maintenanceMode", value: false },
+];
+app.get("/api/admin/settings", auth, admin, asyncRoute(async (_req, res) => {
+  const configured = await PlatformSetting.find({}).lean(); const values = new Map(configured.map((setting) => [setting.key, setting.value]));
+  res.json({ settings: platformSettingDefaults.map((setting) => ({ ...setting, value: values.has(setting.key) ? values.get(setting.key) : setting.value })) });
+}));
+app.patch("/api/admin/settings/:key", auth, admin, asyncRoute(async (req, res) => {
+  const setting = platformSettingDefaults.find((item) => item.key === req.params.key);
+  if (!setting) return res.status(404).json({ error: "Platform setting not found" });
+  let value = req.body?.value;
+  if (["ownerRegistrationEnabled", "maintenanceMode"].includes(setting.key) && typeof value !== "boolean") return res.status(400).json({ error: "Setting value must be a boolean" });
+  if (setting.key === "platformName" && (typeof value !== "string" || !value.trim() || value.trim().length > 100)) return res.status(400).json({ error: "Platform name must contain 1 to 100 characters" });
+  if (setting.key === "supportEmail" && (typeof value !== "string" || value.length > 254 || (value && !/^\S+@\S+\.\S+$/.test(value)))) return res.status(400).json({ error: "Enter a valid support email or leave it blank" });
+  if (setting.key === "defaultCurrency" && (typeof value !== "string" || !/^[A-Z]{3}$/i.test(value))) return res.status(400).json({ error: "Default currency must be a 3-letter code" });
+  if (setting.key === "platformName" || setting.key === "supportEmail") value = value.trim();
+  if (setting.key === "defaultCurrency") value = value.toUpperCase();
+  const saved = await PlatformSetting.findOneAndUpdate({ key: setting.key }, { value, updatedBy: req.user._id }, { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true });
+  if (setting.key === "maintenanceMode") maintenanceCache = { enabled: value, expiresAt: Date.now() + 15_000 };
+  await writeAuditLog(req, { action: "platform_setting.updated", targetType: "platform_setting", targetId: setting.key });
+  res.json({ setting: { key: saved.key, value: saved.value } });
+}));
+app.get("/api/admin/audit-logs", auth, admin, asyncRoute(async (req, res) => {
+  const { page, limit } = pageParams(req); const filter = {};
+  if (req.query.action) filter.action = String(req.query.action).slice(0, 100);
+  const [logs, total] = await Promise.all([AuditLog.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), AuditLog.countDocuments(filter)]);
+  res.json({ logs, page, limit, total });
 }));
 
 app.use("/api", (req, res) => res.status(404).json({ error: "API endpoint not found" }));

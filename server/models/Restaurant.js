@@ -20,10 +20,12 @@ const categorySchema = new mongoose.Schema({
 
 const schema = new mongoose.Schema({
   slug: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
+  businessType: { type: String, enum: ["restaurant", "shop"], default: "restaurant", index: true },
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
   status: { type: String, enum: ["active", "suspended"], default: "active", index: true },
-  plan: { type: String, enum: ["free", "starter", "pro"], default: "free" },
+  plan: { type: String, enum: ["free", "starter", "pro", "basic", "professional", "premium"], default: "free" },
   subscriptionStatus: { type: String, enum: ["trialing", "active", "past_due", "cancelled"], default: "trialing" },
+  subscriptionStartedAt: { type: Date }, subscriptionExpiresAt: { type: Date },
   name: { type: String, default: "", trim: true }, tagline: { type: String, default: "" }, description: { type: String, default: "" },
   area: { type: String, default: "" }, address: { type: String, default: "" }, rating: { type: Number, min: 0, max: 5 },
   eta: { type: String, default: "" }, hours: { type: String, default: "" }, openingTime: { type: String, default: "" }, closingTime: { type: String, default: "" }, whatsapp: { type: String, default: "" },

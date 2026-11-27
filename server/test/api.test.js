@@ -14,8 +14,8 @@ process.env.CLOUDINARY_CLOUD_NAME = "test-cloud";
 process.env.CLOUDINARY_API_KEY = "test-key";
 process.env.CLOUDINARY_API_SECRET = "test-secret";
 
-const [{ default: app }, { default: User }, { default: Restaurant }, { default: Order }] = await Promise.all([
-  import("../index.js"), import("../models/User.js"), import("../models/Restaurant.js"), import("../models/Order.js"),
+const [{ default: app }, { default: User }, { default: Restaurant }, { default: Order }, { default: SubscriptionPlan }, { default: PlatformSetting }, { default: AuditLog }] = await Promise.all([
+  import("../index.js"), import("../models/User.js"), import("../models/Restaurant.js"), import("../models/Order.js"), import("../models/SubscriptionPlan.js"), import("../models/PlatformSetting.js"), import("../models/AuditLog.js"),
 ]);
 
 const ownerId = new mongoose.Types.ObjectId();
@@ -32,6 +32,7 @@ let capturedOrderDetailFilter;
 let createdOrder;
 let cloudinaryFailure = false;
 let cloudinaryCalls = 0;
+let maintenanceEnabled = false;
 
 const restaurant = {
   _id: restaurantId,
@@ -68,6 +69,14 @@ const adminToken = tokenFor(adminUser);
 before(async () => {
   User.findById = async (id) => users.get(String(id)) || null;
   User.findOne = (filter) => ({ select: async () => filter.email === ownerUser.email ? ownerUser : null });
+  SubscriptionPlan.findOne = () => ({ lean: async () => null });
+  SubscriptionPlan.find = () => ({ lean: async () => [] });
+  PlatformSetting.findOne = (filter) => ({ lean: async () => filter.key === "maintenanceMode" && maintenanceEnabled ? { key: filter.key, value: true } : null });
+  PlatformSetting.findOneAndUpdate = async (filter, update) => { if (filter.key === "maintenanceMode") maintenanceEnabled = update.value; return { key: filter.key, value: update.value }; };
+  PlatformSetting.find = () => ({ lean: async () => [] });
+  AuditLog.find = () => ({ sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [] });
+  AuditLog.countDocuments = async () => 0;
+  AuditLog.create = async () => ({});
   Restaurant.findById = async () => restaurant;
   Restaurant.findOne = async (filter) => {
     capturedRestaurantFilter = filter;
@@ -167,6 +176,30 @@ test("owner login verifies password hashes and registration rejects malformed fi
   assert.equal(login.restaurant.slug, "test-kitchen");
   response = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: ownerUser.email, password: "incorrect-password" }) });
   assert.equal(response.status, 401);
+});
+
+test("admin plan, platform setting, and audit endpoints are role protected and expose safe defaults", async () => {
+  let response = await fetch(`${baseUrl}/api/admin/subscription-plans`);
+  assert.equal(response.status, 401);
+  response = await fetch(`${baseUrl}/api/admin/subscription-plans`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  assert.equal(response.status, 200);
+  const plans = await response.json();
+  assert.deepEqual(plans.plans.map((plan) => plan.key), ["free", "basic", "professional", "premium"]);
+  response = await fetch(`${baseUrl}/api/admin/settings`, { headers: { Authorization: `Bearer ${ownerToken}` } });
+  assert.equal(response.status, 403);
+  response = await fetch(`${baseUrl}/api/admin/settings`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).settings.find((setting) => setting.key === "ownerRegistrationEnabled").value, true);
+  response = await fetch(`${baseUrl}/api/admin/audit-logs`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).logs, []);
+  response = await fetch(`${baseUrl}/api/admin/settings/maintenanceMode`, { method: "PATCH", headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ value: true }) });
+  assert.equal(response.status, 200);
+  response = await fetch(`${baseUrl}/api/r/test-kitchen`);
+  assert.equal(response.status, 503);
+  response = await fetch(`${baseUrl}/api/admin/subscription-plans`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  assert.equal(response.status, 200);
+  await fetch(`${baseUrl}/api/admin/settings/maintenanceMode`, { method: "PATCH", headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ value: false }) });
 });
 
 test("owner APIs require an active owner session and keep queries tenant-scoped", async () => {
