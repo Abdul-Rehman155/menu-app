@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveMongoUri } from "./config/mongo-uri.js";
+import { parseImageDataUri } from "./config/image-upload.js";
 import Restaurant from "./models/Restaurant.js";
 import User from "./models/User.js";
 import Order from "./models/Order.js";
@@ -176,16 +177,31 @@ app.put("/api/owner/menu", auth, owner, ownedRestaurant, asyncRoute(async (req, 
 app.post("/api/owner/uploads", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   const { CLOUDINARY_CLOUD_NAME: cloudName, CLOUDINARY_API_KEY: apiKey, CLOUDINARY_API_SECRET: apiSecret } = process.env;
   if (!cloudName || !apiKey || !apiSecret) return res.status(503).json({ error: "Image uploads are not configured on this server" });
-  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(req.body?.data || ""));
-  if (!match) return res.status(400).json({ error: "Upload a JPG, PNG, or WebP image" });
-  const buffer = Buffer.from(match[2], "base64");
-  if (!buffer.length || buffer.length > 5 * 1024 * 1024) return res.status(413).json({ error: "Image must be smaller than 5 MB" });
+  let image;
+  try { image = parseImageDataUri(req.body?.data); }
+  catch (error) { return res.status(error.status || 400).json({ error: error.message }); }
   const timestamp = String(Math.floor(Date.now() / 1000)); const folder = `restaurant-saas/${req.restaurant.id}`;
   const signature = createHash("sha1").update(`folder=${folder}&timestamp=${timestamp}${apiSecret}`).digest("hex");
-  const form = new FormData(); form.append("file", new Blob([buffer], { type: match[1] }), "upload"); form.append("api_key", apiKey); form.append("timestamp", timestamp); form.append("folder", folder); form.append("signature", signature);
-  const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, { method: "POST", body: form });
-  if (!response.ok) { console.error("Cloudinary upload failed with status", response.status); return res.status(502).json({ error: "Image provider could not process the upload" }); }
-  const uploaded = await response.json(); res.status(201).json({ url: uploaded.secure_url, publicId: uploaded.public_id, width: uploaded.width, height: uploaded.height });
+  const form = new FormData(); form.append("file", new Blob([image.buffer], { type: image.mimeType }), "upload"); form.append("api_key", apiKey); form.append("timestamp", timestamp); form.append("folder", folder); form.append("signature", signature);
+  let response;
+  try {
+    response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, { method: "POST", body: form, signal: AbortSignal.timeout(30_000) });
+  } catch (error) {
+    console.error("Cloudinary upload request failed:", error.name);
+    return res.status(502).json({ error: error.name === "TimeoutError" ? "Image provider timed out. Try again." : "Could not connect to the image provider" });
+  }
+  if (!response.ok) {
+    console.error("Cloudinary upload failed with status", response.status);
+    return res.status(502).json({ error: "Image provider could not process the upload. Check the Cloudinary credentials and try again." });
+  }
+  const uploaded = await response.json().catch(() => null);
+  let imageUrl;
+  try { imageUrl = new URL(uploaded?.secure_url); } catch {}
+  if (!imageUrl || imageUrl.protocol !== "https:" || !uploaded?.public_id) {
+    console.error("Cloudinary returned an invalid upload response");
+    return res.status(502).json({ error: "Image provider returned an invalid image URL" });
+  }
+  res.status(201).json({ url: imageUrl.href, publicId: uploaded.public_id, width: uploaded.width, height: uploaded.height });
 }));
 app.get("/api/owner/orders", auth, owner, asyncRoute(async (req, res) => {
   const { page, limit } = pageParams(req); const filter = { restaurantId: req.user.restaurantId };

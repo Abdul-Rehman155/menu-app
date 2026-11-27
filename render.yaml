@@ -15,3 +15,9 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         value: https://menu-app-pearl.vercel.app,https://menu-6v69ebu3r-abdul-rehman-abe3.vercel.app
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
