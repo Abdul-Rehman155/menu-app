@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: restaurant-saas-api
+    name: menu-app-api
     runtime: node
     rootDir: server
     buildCommand: npm install

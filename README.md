@@ -47,14 +47,14 @@ On Windows, the API falls back to PowerShell DNS resolution for Atlas SRV record
 | `MONGO_URI` | Yes | MongoDB connection string |
 | `JWT_SECRET` | Yes | Random signing secret, at least 32 characters |
 | `PORT` | No | API port, defaults to 5000 |
-| `CLIENT_ORIGIN` | No | Comma-separated allowed browser origins; defaults to Vite localhost |
+| `CORS_ORIGINS` | Production | Comma-separated allowed browser origins. Render config includes the production and current Vercel origins; the backend also recognizes project-scoped Vercel preview URLs. `CLIENT_ORIGIN` remains a legacy alias. |
 | `OWNER_EMAIL` | Seed only | Email for the initial Chai Corner owner |
 | `OWNER_PASSWORD` | Seed only | Initial owner password, at least 10 characters |
 | `SUPER_ADMIN_EMAIL` | Seed only | Email for a provisioned platform administrator |
 | `SUPER_ADMIN_PASSWORD` | Seed only | Initial admin password, at least 16 characters |
-| `CLOUDINARY_CLOUD_NAME` | Image upload only | Cloudinary account name |
+| `CLOUDINARY_CLOUD_NAME` | Image upload only | Cloudinary account name; backend only |
 | `CLOUDINARY_API_KEY` | Image upload only | Server-side Cloudinary API key |
-| `CLOUDINARY_API_SECRET` | Image upload only | Server-side Cloudinary signing secret |
+| `CLOUDINARY_API_SECRET` | Image upload only | Server-side Cloudinary signing secret; never expose to Vite |
 | `VITE_API_URL` | No | Public API base URL compiled into the frontend |
 
 Provision or update the demo data without deleting existing records:
@@ -82,10 +82,11 @@ Customer order submission uses cash as the payment method and leaves payment pen
 ## Deployment notes
 
 1. Create MongoDB Atlas database credentials and allow network access from the backend host.
-2. Deploy `server/` as a Node service, set `MONGO_URI`, `JWT_SECRET`, `CLIENT_ORIGIN`, and `NODE_ENV=production`, then use `npm start`.
-3. Deploy the repository root to Vercel with `npm run build` and set `VITE_API_URL` to the deployed API origin. Configure SPA fallback routing for `/owner`, `/admin`, and `/r/*`.
-4. Run the seed command once with protected owner/admin values in the backend environment. Do not expose these values in frontend environment variables.
-5. Verify `/api/health`, sign in, place a small test order, and check that a different owner cannot retrieve it.
+2. Deploy `server/` as the `menu-app-api` Node service, set `MONGO_URI`, a random `JWT_SECRET` of at least 32 characters, `CORS_ORIGINS`, and `NODE_ENV=production`, then use `npm start`.
+3. Add `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in Render to enable image uploads. Images are validated and uploaded from memory to Cloudinary; Render disk is not used for permanent storage.
+4. Deploy the repository root to Vercel with `npm run build` and set `VITE_API_URL=https://menu-app-api-i3ap.onrender.com`. Configure SPA fallback routing for `/owner`, `/admin`, and `/r/*`.
+5. Run the seed command once with protected owner/admin values in the backend environment. Do not expose these values in frontend environment variables.
+6. Verify `/api/health`, sign in, place a small test order, and check that a different owner cannot retrieve it.
 
 ## Current implementation checklist
 
@@ -96,19 +97,21 @@ Customer order submission uses cash as the payment method and leaves payment pen
 - [x] Server-priced customer orders with item snapshots and unique order numbers
 - [x] Owner order polling, detail view, search/date/status filters, lifecycle transitions, and cancellation reasons
 - [x] Stored-order daily, weekly, and monthly revenue/order charts, status counts, and popular menu item analytics
-- [x] Menu/category CRUD, availability, featured flags, and optional signed Cloudinary image uploads
+- [x] Menu/category CRUD, availability, featured flags, and authenticated Multer memory uploads to Cloudinary
 - [x] Restaurant open/closed, hours, minimum order, taxes, delivery settings, and owner profile management
 - [x] Tenant-scoped customer history and date-filtered CSV sales reports
 - [x] Server-calculated tax/delivery totals and minimum-order/open-status checks at checkout
 - [x] Super admin login gate, restaurant overview, listing, activate/suspend endpoints and panel
 - [x] Non-destructive demo seed, deployment notes, env example, and secret ignore rules
-- [ ] Dedicated Category, Subscription, Payment, AuditLog, and PlatformSettings models/APIs
 - [ ] Subscription plan configuration and backend plan-limit enforcement
 - [ ] Payment provider integration (requires provider credentials and verified webhooks)
 - [ ] Configure Cloudinary credentials before enabling image uploads in a deployment
 - [ ] QR generation/download and print layout
 - [ ] Admin audit logs and authorized admin account management
-- [ ] API schema docs, authenticated API/tenant-isolation tests, and deployment verification
-- [ ] Dedicated Helmet, express-rate-limit, validation-library, React Router, and form-library packages. Registry access was unavailable during this implementation; the API currently has basic security headers, in-process request throttling, and explicit server validation.
+- [x] Automated API tests for CORS, auth/roles, tenant scoping, customer order pricing, uploads, and menu saves
+- [ ] Full database-backed integration tests, API schema docs, and deployed service verification
+- [x] Helmet security headers and bounded express-rate-limit middleware for API and authentication routes
+- [ ] A shared rate-limit store for horizontal scaling; the current limiter uses per-process memory and is appropriate only while running a single backend instance.
+- [ ] Dedicated Category, Subscription, Payment, AuditLog, and PlatformSettings models/APIs, admin audit logs, and API schema documentation.
 
-The current security headers and in-memory rate limits are starter safeguards; production deployment should install and configure Helmet and a shared rate-limit store. Do not consider the platform launch-ready until the incomplete items above are addressed and the deployed order flow is verified.
+Do not consider the platform launch-ready until the incomplete product capabilities above are addressed, a shared rate-limit store is configured before scaling beyond one backend instance, and deployed database, upload, and order flows are verified.

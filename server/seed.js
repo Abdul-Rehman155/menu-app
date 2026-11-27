@@ -19,7 +19,10 @@ async function seed() {
     if (process.env.OWNER_PASSWORD.length < 10) throw new Error("OWNER_PASSWORD must be at least 10 characters");
     const email = process.env.OWNER_EMAIL.toLowerCase().trim();
     let user = await User.findOne({ email });
+    if (user && (user.role !== "owner" || (user.restaurantId && String(user.restaurantId) !== String(restaurant._id)))) throw new Error("OWNER_EMAIL belongs to a different account or restaurant; refusing to reassign it");
+    if (user && restaurant.ownerId && String(restaurant.ownerId) !== String(user._id)) throw new Error("The demo restaurant already belongs to a different owner; refusing to reassign it");
     if (!user) user = await User.create({ name: "Restaurant Owner", email, passwordHash: await bcrypt.hash(process.env.OWNER_PASSWORD, 12), role: "owner", restaurantId: restaurant._id });
+    else if (!user.restaurantId) { user.restaurantId = restaurant._id; await user.save(); }
     restaurant.ownerId = user._id; await restaurant.save();
     console.log("Owner account provisioned or already present. Existing password was left unchanged.");
   } else console.log("Demo restaurant is ready. Set OWNER_EMAIL and OWNER_PASSWORD to provision its owner login.");
@@ -32,4 +35,4 @@ async function seed() {
     console.log("Super admin account provisioned or already present.");
   }
 }
-seed().catch((error) => { console.error("Seed failed:", error.message); process.exitCode = 1; }).finally(() => mongoose.disconnect());
+seed().catch((error) => { console.error("Seed failed:", error.name || "Error"); process.exitCode = 1; }).finally(() => mongoose.disconnect());

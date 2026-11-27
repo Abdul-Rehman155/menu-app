@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import { rateLimit } from "express-rate-limit";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -39,7 +41,8 @@ if (!jwtSecret || jwtSecret.length < 32) {
 }
 const app = express();
 app.disable("x-powered-by");
-app.use((_, res, next) => { res.set({ "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cross-Origin-Resource-Policy": "same-site" }); next(); });
+app.set("trust proxy", process.env.NODE_ENV === "production" ? 1 : false);
+app.use(helmet({ frameguard: { action: "deny" }, crossOriginResourcePolicy: { policy: "same-site" }, referrerPolicy: { policy: "no-referrer" } }));
 const configuredOrigins = [process.env.CORS_ORIGINS, process.env.CLIENT_ORIGIN]
   .filter(Boolean)
   .flatMap((value) => value.split(","))
@@ -59,28 +62,40 @@ app.use(cors({
   allowedHeaders: ["Authorization", "Content-Type"],
   optionsSuccessStatus: 204,
 }));
-app.use(express.json({ limit: "7mb" }));
-const windows = new Map();
-app.use("/api", (req, res, next) => {
-  const key = `${req.ip}:${req.path.startsWith("/auth/") ? "auth" : "api"}`; const now = Date.now(); const windowMs = 15 * 60 * 1000; const max = key.endsWith(":auth") ? 25 : 400; let entry = windows.get(key);
-  if (!entry || now > entry.reset) entry = { count: 0, reset: now + windowMs }; entry.count++; windows.set(key, entry); res.set("RateLimit-Remaining", String(Math.max(0, max - entry.count)));
-  if (entry.count > max) return res.status(429).json({ error: "Too many requests. Try again later." }); next();
+app.use(express.json({ limit: "2mb" }));
+app.use((req, _res, next) => { if (req.body === undefined) req.body = {}; next(); });
+const makeLimiter = (limit) => rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  handler: (_req, res) => res.status(429).json({ error: "Too many requests. Try again later." }),
 });
+app.use("/api", makeLimiter(400));
+app.use("/api/auth", makeLimiter(25));
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const safeRestaurant = (r) => { const o = r.toObject(); delete o.passwordHash; return o; };
+const publicRestaurant = (r) => {
+  const source = r.toObject();
+  const fields = ["slug", "name", "tagline", "description", "area", "address", "rating", "eta", "hours", "openingTime", "closingTime", "whatsapp", "phone", "email", "logo", "coverImage", "currency", "deliveryFee", "minOrderAmount", "taxPercent", "deliveryEnabled", "pickupEnabled", "dineInEnabled", "isOpen", "menu"];
+  return Object.fromEntries(fields.map((field) => [field, source[field]]));
+};
 const auth = asyncRoute(async (req, res, next) => {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return res.status(401).json({ error: "Authentication required" });
+  let payload;
   try {
-    const payload = jwt.verify(token, jwtSecret);
-    const user = await User.findById(payload.sub);
-    if (!user || !user.active || user.role !== payload.role) return res.status(401).json({ error: "Session is no longer valid" });
-    req.user = user; next();
+    payload = jwt.verify(token, jwtSecret, { issuer: "restaurant-saas", algorithms: ["HS256"] });
   } catch { return res.status(401).json({ error: "Invalid or expired session" }); }
+  const user = await User.findById(payload.sub);
+  if (!user || !user.active || user.role !== payload.role) return res.status(401).json({ error: "Session is no longer valid" });
+  req.user = user; next();
 });
 const owner = (req, res, next) => req.user?.role === "owner" ? next() : res.status(403).json({ error: "Owner access required" });
 const admin = (req, res, next) => req.user?.role === "super_admin" ? next() : res.status(403).json({ error: "Super admin access required" });
 const ownedRestaurant = asyncRoute(async (req, res, next) => {
+  if (!mongoose.isValidObjectId(req.user.restaurantId)) return res.status(404).json({ error: "Restaurant not found or suspended" });
   const restaurant = await Restaurant.findOne({ _id: req.user.restaurantId, status: "active" });
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found or suspended" });
   req.restaurant = restaurant; next();
@@ -90,19 +105,26 @@ const pageParams = (req) => ({ page: Math.max(1, Number.parseInt(req.query.page,
 const orderStatuses = ["pending", "confirmed", "preparing", "ready", "out_for_delivery", "completed", "cancelled"];
 
 app.get("/", (_req, res) => res.json({ ok: true, service: "restaurant-saas-api" }));
-app.get("/api/health", (_req, res) => res.json({ ok: true, database: mongoose.connection.readyState === 1 ? "connected" : "disconnected" }));
+app.get("/api/health", (_req, res) => {
+  const connected = mongoose.connection.readyState === 1;
+  res.status(connected ? 200 : 503).json({ ok: connected, service: "restaurant-saas-api", database: connected ? "connected" : "disconnected" });
+});
 
 app.post("/api/auth/register", asyncRoute(async (req, res) => {
   const { name, email, password, restaurantName, slug } = req.body || {};
+  const cleanName = typeof name === "string" ? name.trim() : "";
+  const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+  const cleanPassword = typeof password === "string" ? password : "";
+  const cleanRestaurantName = typeof restaurantName === "string" ? restaurantName.trim() : "";
   const safeSlug = String(slug || "").trim().toLowerCase();
-  if (!name?.trim() || !/^\S+@\S+\.\S+$/.test(String(email || "")) || String(password || "").length < 10 || !restaurantName?.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(safeSlug)) return res.status(400).json({ error: "Provide a name, valid email, password (10+ characters), restaurant name, and a URL-friendly unique slug" });
-  if (await User.exists({ email: String(email).toLowerCase() })) return res.status(409).json({ error: "An account already exists for that email" });
+  if (!cleanName || cleanName.length > 100 || !/^\S+@\S+\.\S+$/.test(cleanEmail) || cleanEmail.length > 254 || cleanPassword.length < 10 || cleanPassword.length > 128 || !cleanRestaurantName || cleanRestaurantName.length > 120 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(safeSlug)) return res.status(400).json({ error: "Provide a name, valid email, password (10–128 characters), restaurant name, and a URL-friendly unique slug" });
+  if (await User.exists({ email: cleanEmail })) return res.status(409).json({ error: "An account already exists for that email" });
   if (await Restaurant.exists({ slug: safeSlug })) return res.status(409).json({ error: "That restaurant URL is already taken" });
   const session = await mongoose.startSession();
   let result;
   try { await session.withTransaction(async () => {
     const restaurant = await Restaurant.create([{ slug: safeSlug, name: restaurantName.trim(), ownerId: new mongoose.Types.ObjectId() }], { session });
-    const user = await User.create([{ name: name.trim(), email: String(email).toLowerCase().trim(), passwordHash: await bcrypt.hash(password, 12), restaurantId: restaurant[0]._id }], { session });
+    const user = await User.create([{ name: cleanName, email: cleanEmail, passwordHash: await bcrypt.hash(cleanPassword, 12), restaurantId: restaurant[0]._id }], { session });
     restaurant[0].ownerId = user[0]._id; await restaurant[0].save({ session }); result = { user: user[0], restaurant: restaurant[0] };
   }); } finally { await session.endSession(); }
   const token = jwt.sign({ sub: result.user.id, role: "owner" }, jwtSecret, { expiresIn: "12h", issuer: "restaurant-saas" });
@@ -118,35 +140,44 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
 }));
 app.get("/api/auth/me", auth, asyncRoute(async (req, res) => res.json({ user: { name: req.user.name, email: req.user.email, role: req.user.role }, restaurant: req.user.restaurantId ? safeRestaurant(await Restaurant.findById(req.user.restaurantId)) : null })));
 app.patch("/api/auth/profile", auth, asyncRoute(async (req, res) => {
-  const name = String(req.body?.name || "").trim(); const email = String(req.body?.email || "").toLowerCase().trim();
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : ""; const email = typeof req.body?.email === "string" ? req.body.email.toLowerCase().trim() : "";
   if (!name || name.length > 100 || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: "Enter a name (up to 100 characters) and a valid email" });
   if (await User.exists({ email, _id: { $ne: req.user._id } })) return res.status(409).json({ error: "That email is already in use" });
   req.user.name = name; req.user.email = email; await req.user.save(); res.json({ user: { name, email, role: req.user.role } });
 }));
 app.post("/api/auth/change-password", auth, asyncRoute(async (req, res) => {
-  const { currentPassword, newPassword } = req.body || {}; const user = await User.findById(req.user.id).select("+passwordHash");
-  if (String(newPassword || "").length < 10) return res.status(400).json({ error: "New password must be at least 10 characters" });
-  if (!(await bcrypt.compare(String(currentPassword || ""), user.passwordHash))) return res.status(400).json({ error: "Current password is incorrect" });
+  const currentPassword = typeof req.body?.currentPassword === "string" ? req.body.currentPassword : "";
+  const newPassword = typeof req.body?.newPassword === "string" ? req.body.newPassword : "";
+  const user = await User.findById(req.user.id).select("+passwordHash");
+  if (newPassword.length < 10 || newPassword.length > 128) return res.status(400).json({ error: "New password must be between 10 and 128 characters" });
+  if (!(await bcrypt.compare(currentPassword, user.passwordHash))) return res.status(400).json({ error: "Current password is incorrect" });
   user.passwordHash = await bcrypt.hash(newPassword, 12); await user.save(); res.json({ ok: true });
 }));
 
 app.get("/api/r/:slug", asyncRoute(async (req, res) => {
   const restaurant = await Restaurant.findOne({ slug: String(req.params.slug).toLowerCase(), status: "active" });
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
-  const data = safeRestaurant(restaurant); data.menu = data.menu.filter((c) => c.enabled !== false).map((c) => ({ ...c, items: c.items.filter((i) => i.available !== false) })); res.json(data);
+  const data = publicRestaurant(restaurant); data.menu = data.menu.filter((c) => c.enabled !== false).map((c) => ({ ...c, items: c.items.filter((i) => i.available !== false) })); res.json(data);
 }));
 app.post("/api/r/:slug/orders", asyncRoute(async (req, res) => {
   const restaurant = await Restaurant.findOne({ slug: String(req.params.slug).toLowerCase(), status: "active" });
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
   if (!restaurant.isOpen) return res.status(409).json({ error: "This restaurant is currently closed" });
-  const { customer = {}, fulfillment, items = [] } = req.body || {};
-  if (!customer.name?.trim() || !/^\+?[0-9 ()-]{7,20}$/.test(String(customer.phone || ""))) return res.status(400).json({ error: "Enter a customer name and valid phone number" });
+  const { fulfillment, items = [] } = req.body || {};
+  const customer = req.body?.customer && typeof req.body.customer === "object" && !Array.isArray(req.body.customer) ? req.body.customer : {};
+  const customerName = typeof customer.name === "string" ? customer.name.trim() : "";
+  const customerPhone = typeof customer.phone === "string" ? customer.phone.trim() : "";
+  const address = typeof customer.address === "string" ? customer.address.trim() : "";
+  const tableNumber = typeof customer.tableNumber === "string" ? customer.tableNumber.trim() : "";
+  const notes = typeof customer.notes === "string" ? customer.notes.trim().slice(0, 1000) : "";
+  if (!customerName || customerName.length > 100 || !/^\+?[0-9 ()-]{7,20}$/.test(customerPhone)) return res.status(400).json({ error: "Enter a customer name and valid phone number" });
   if (!["delivery", "pickup", "dine-in"].includes(fulfillment) || !Array.isArray(items) || items.length < 1 || items.length > 50) return res.status(400).json({ error: "Choose a fulfillment option and add 1–50 items" });
-  if (fulfillment === "delivery" && (!restaurant.deliveryEnabled || !customer.address?.trim())) return res.status(400).json({ error: "Delivery is unavailable or an address is missing" });
+  if (fulfillment === "delivery" && (!restaurant.deliveryEnabled || !address)) return res.status(400).json({ error: "Delivery is unavailable or an address is missing" });
   if (fulfillment === "pickup" && !restaurant.pickupEnabled) return res.status(400).json({ error: "Pickup is unavailable" });
-  if (fulfillment === "dine-in" && (!restaurant.dineInEnabled || !customer.tableNumber?.trim())) return res.status(400).json({ error: "Dine-in is unavailable or a table number is missing" });
+  if (fulfillment === "dine-in" && (!restaurant.dineInEnabled || !tableNumber)) return res.status(400).json({ error: "Dine-in is unavailable or a table number is missing" });
   const orderLines = []; let subtotal = 0;
   for (const requested of items) {
+    if (!requested || typeof requested !== "object") return res.status(400).json({ error: "Each order item must include a product and quantity" });
     const quantity = Number(requested.quantity); if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) return res.status(400).json({ error: "Item quantities must be between 1 and 99" });
     const product = restaurant.menu.filter((category) => category.enabled !== false).flatMap((c) => c.items).find((i) => i._id.toString() === String(requested.productId));
     if (!product || !product.available) return res.status(409).json({ error: "An item in your cart is unavailable" });
@@ -158,7 +189,7 @@ app.post("/api/r/:slug/orders", asyncRoute(async (req, res) => {
   const taxPercent = Number(restaurant.taxPercent || 0);
   const taxAmount = Number((subtotal * taxPercent / 100).toFixed(2));
   const orderNumber = `CC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-  const order = await Order.create({ orderNumber, restaurantId: restaurant._id, customer: { name: customer.name.trim(), phone: String(customer.phone).trim(), address: customer.address?.trim(), tableNumber: customer.tableNumber?.trim(), notes: String(customer.notes || "").trim().slice(0, 1000) }, fulfillment, items: orderLines, subtotal: Number(subtotal.toFixed(2)), taxPercent, taxAmount, deliveryFee, total: Number((subtotal + taxAmount + deliveryFee).toFixed(2)), currency: restaurant.currency, statusHistory: [{ status: "pending", note: "Order placed by customer" }] });
+  const order = await Order.create({ orderNumber, restaurantId: restaurant._id, customer: { name: customerName, phone: customerPhone, address, tableNumber, notes }, fulfillment, items: orderLines, subtotal: Number(subtotal.toFixed(2)), taxPercent, taxAmount, deliveryFee, total: Number((subtotal + taxAmount + deliveryFee).toFixed(2)), currency: restaurant.currency, statusHistory: [{ status: "pending", note: "Order placed by customer" }] });
   res.status(201).json({ order: { orderNumber: order.orderNumber, status: order.status, total: order.total, currency: order.currency, createdAt: order.createdAt } });
 }));
 
@@ -194,20 +225,21 @@ app.post("/api/owner/uploads", auth, owner, ownedRestaurant, uploadImage.single(
   }
   res.status(201).json({ success: true, secure_url: imageUrl.href, public_id: uploaded.public_id, message: "Image uploaded successfully" });
 }));
-app.get("/api/owner/orders", auth, owner, asyncRoute(async (req, res) => {
+app.get("/api/owner/orders", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   const { page, limit } = pageParams(req); const filter = { restaurantId: req.user.restaurantId };
   if (orderStatuses.includes(req.query.status)) filter.status = req.query.status;
   if (req.query.search) { const q = escapeRegex(String(req.query.search).slice(0, 50)); filter.$or = [{ orderNumber: { $regex: q, $options: "i" } }, { "customer.name": { $regex: q, $options: "i" } }, { "customer.phone": { $regex: q.slice(0, 30), $options: "i" } }]; }
   if (req.query.from || req.query.to) { const range = {}; if (req.query.from) { if (Number.isNaN(Date.parse(req.query.from))) return res.status(400).json({ error: "Invalid start date" }); range.$gte = new Date(req.query.from); } if (req.query.to) { if (Number.isNaN(Date.parse(req.query.to))) return res.status(400).json({ error: "Invalid end date" }); const end = new Date(req.query.to); end.setUTCHours(23, 59, 59, 999); range.$lte = end; } if (range.$gte && range.$lte && range.$gte > range.$lte) return res.status(400).json({ error: "Start date must be before end date" }); filter.createdAt = range; }
   const [orders, total] = await Promise.all([Order.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), Order.countDocuments(filter)]); res.json({ orders, page, limit, total });
 }));
-app.get("/api/owner/orders/:id", auth, owner, asyncRoute(async (req, res) => {
+app.get("/api/owner/orders/:id", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid order ID" });
   const order = await Order.findOne({ _id: req.params.id, restaurantId: req.user.restaurantId }).lean();
   if (!order) return res.status(404).json({ error: "Order not found" });
   res.json({ order });
 }));
-app.patch("/api/owner/orders/:id/status", auth, owner, asyncRoute(async (req, res) => {
+app.patch("/api/owner/orders/:id/status", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid order ID" });
   const { status } = req.body || {}; if (!orderStatuses.includes(status)) return res.status(400).json({ error: "Invalid order status" });
   if (status === "cancelled" && !String(req.body.reason || "").trim()) return res.status(400).json({ error: "A cancellation reason is required" });
   const order = await Order.findOne({ _id: req.params.id, restaurantId: req.user.restaurantId }); if (!order) return res.status(404).json({ error: "Order not found" });
@@ -215,7 +247,7 @@ app.patch("/api/owner/orders/:id/status", auth, owner, asyncRoute(async (req, re
   if (!allowed[order.status].includes(status)) return res.status(409).json({ error: `Cannot change ${order.status} to ${status}` });
   order.status = status; order.statusHistory.push({ status, by: req.user._id, note: String(req.body.reason || req.body.note || "").trim().slice(0, 300) }); await order.save(); res.json({ order });
 }));
-app.get("/api/owner/analytics", auth, owner, asyncRoute(async (req, res) => {
+app.get("/api/owner/analytics", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   const restaurantId = new mongoose.Types.ObjectId(req.user.restaurantId); const now = new Date();
   const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -238,7 +270,7 @@ app.get("/api/owner/analytics", auth, owner, asyncRoute(async (req, res) => {
   const menuItems = restaurant?.menu.reduce((sum, category) => sum + category.items.length, 0) || 0;
   res.json({ totalOrders, todayOrders, pendingOrders: statusMap.pending || 0, acceptedOrders: statusMap.confirmed || 0, preparingOrders: statusMap.preparing || 0, completedOrders: statusMap.completed || 0, cancelledOrders: statusMap.cancelled || 0, revenue: allRevenue[0]?.total || 0, todayRevenue: todayRevenue[0]?.total || 0, monthlyRevenue: monthlyRevenue[0]?.total || 0, totalMenuItems: menuItems, statusCounts: statusMap, daily, weekly, monthly, popularItems, currency: restaurant?.currency || "Rs" });
 }));
-app.get("/api/owner/customers", auth, owner, asyncRoute(async (req, res) => {
+app.get("/api/owner/customers", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   const { page, limit } = pageParams(req); const match = { restaurantId: new mongoose.Types.ObjectId(req.user.restaurantId) };
   const q = String(req.query.search || "").trim().slice(0, 50);
   const pipeline = [{ $match: match }, { $sort: { createdAt: -1 } }, { $group: { _id: "$customer.phone", name: { $first: "$customer.name" }, phone: { $first: "$customer.phone" }, totalOrders: { $sum: 1 }, amountSpent: { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 0, "$total"] } }, lastOrderAt: { $max: "$createdAt" } } }];
@@ -246,7 +278,7 @@ app.get("/api/owner/customers", auth, owner, asyncRoute(async (req, res) => {
   const [rows, count] = await Promise.all([Order.aggregate([...pipeline, { $sort: { lastOrderAt: -1 } }, { $skip: (page - 1) * limit }, { $limit: limit }]), Order.aggregate([...pipeline, { $count: "total" }])]);
   res.json({ customers: rows, page, limit, total: count[0]?.total || 0 });
 }));
-app.get("/api/owner/reports", auth, owner, asyncRoute(async (req, res) => {
+app.get("/api/owner/reports", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
   const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 30 * 86400000); const to = req.query.to ? new Date(req.query.to) : new Date();
   if (Number.isNaN(from.valueOf()) || Number.isNaN(to.valueOf()) || from > to || to - from > 366 * 86400000) return res.status(400).json({ error: "Choose a valid date range up to 366 days" });
   to.setUTCHours(23, 59, 59, 999);
@@ -267,16 +299,18 @@ app.get("/api/admin/restaurants", auth, admin, asyncRoute(async (req, res) => {
 }));
 app.patch("/api/admin/restaurants/:id/status", auth, admin, asyncRoute(async (req, res) => {
   if (!["active", "suspended"].includes(req.body?.status)) return res.status(400).json({ error: "Status must be active or suspended" });
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid restaurant ID" });
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true, runValidators: true }); if (!restaurant) return res.status(404).json({ error: "Restaurant not found" }); res.json({ restaurant: safeRestaurant(restaurant) });
 }));
 
+app.use("/api", (req, res) => res.status(404).json({ error: "API endpoint not found" }));
 app.use(sendUploadError);
-app.use((err, _req, res, _next) => { if (err?.message === "Origin is not allowed") return res.status(403).json({ error: "Origin is not allowed" }); if (err?.status === 413) return res.status(413).json({ error: "Request body is too large" }); if (err?.name === "ValidationError") return res.status(400).json({ error: "Invalid data", details: Object.values(err.errors).map((e) => e.message) }); if (err?.code === 11000) return res.status(409).json({ error: "That value is already in use" }); console.error("API error:", err.message); res.status(500).json({ error: "Something went wrong" }); });
+app.use((err, _req, res, _next) => { if (err?.message === "Origin is not allowed") return res.status(403).json({ error: "Origin is not allowed" }); if (err?.status === 413) return res.status(413).json({ error: "Request body is too large" }); if (err?.type === "entity.parse.failed") return res.status(400).json({ error: "Invalid JSON request body" }); if (err?.name === "ValidationError" || err?.name === "CastError") return res.status(400).json({ error: "Invalid data" }); if (err?.code === 11000) return res.status(409).json({ error: "That value is already in use" }); console.error("API error:", err.name || "Error", err.code || ""); res.status(500).json({ error: "Something went wrong" }); });
 
 async function start() {
   await mongoose.connect(await resolveMongoUri(process.env.MONGO_URI));
   const port = Number(process.env.PORT || 5000);
   app.listen(port, () => console.log(`Restaurant API listening on ${port}`));
 }
-if (process.env.NODE_ENV !== "test") start().catch((error) => { console.error("Server startup failed:", error.message); process.exitCode = 1; });
+if (process.env.NODE_ENV !== "test") start().catch((error) => { console.error("Server startup failed:", error.name || "Error"); process.exitCode = 1; });
 export default app;
