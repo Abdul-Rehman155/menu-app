@@ -4,11 +4,13 @@ import cors from "cors";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveMongoUri } from "./config/mongo-uri.js";
-import { parseImageDataUri } from "./config/image-upload.js";
+import { hasCloudinaryConfig, uploadImageBuffer } from "./config/cloudinary.js";
+import { uploadImage, validateImageBuffer } from "./middleware/image-upload.js";
+import { sendUploadError } from "./middleware/upload-error.js";
 import Restaurant from "./models/Restaurant.js";
 import User from "./models/User.js";
 import Order from "./models/Order.js";
@@ -174,34 +176,23 @@ app.put("/api/owner/menu", auth, owner, ownedRestaurant, asyncRoute(async (req, 
   if (!Array.isArray(req.body.menu) || req.body.menu.length > 100) return res.status(400).json({ error: "Menu must contain at most 100 categories" });
   req.restaurant.menu = req.body.menu; await req.restaurant.save(); res.json({ menu: req.restaurant.menu });
 }));
-app.post("/api/owner/uploads", auth, owner, ownedRestaurant, asyncRoute(async (req, res) => {
-  const { CLOUDINARY_CLOUD_NAME: cloudName, CLOUDINARY_API_KEY: apiKey, CLOUDINARY_API_SECRET: apiSecret } = process.env;
-  if (!cloudName || !apiKey || !apiSecret) return res.status(503).json({ error: "Image uploads are not configured on this server" });
-  let image;
-  try { image = parseImageDataUri(req.body?.data); }
-  catch (error) { return res.status(error.status || 400).json({ error: error.message }); }
-  const timestamp = String(Math.floor(Date.now() / 1000)); const folder = `restaurant-saas/${req.restaurant.id}`;
-  const signature = createHash("sha1").update(`folder=${folder}&timestamp=${timestamp}${apiSecret}`).digest("hex");
-  const form = new FormData(); form.append("file", new Blob([image.buffer], { type: image.mimeType }), "upload"); form.append("api_key", apiKey); form.append("timestamp", timestamp); form.append("folder", folder); form.append("signature", signature);
-  let response;
-  try {
-    response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, { method: "POST", body: form, signal: AbortSignal.timeout(30_000) });
-  } catch (error) {
-    console.error("Cloudinary upload request failed:", error.name);
-    return res.status(502).json({ error: error.name === "TimeoutError" ? "Image provider timed out. Try again." : "Could not connect to the image provider" });
+app.post("/api/owner/uploads", auth, owner, ownedRestaurant, uploadImage.single("file"), asyncRoute(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Select a JPEG, PNG, or WebP image to upload" });
+  if (!hasCloudinaryConfig()) return res.status(503).json({ error: "Image uploads are not configured on this server. Add the Cloudinary credentials in the backend environment." });
+  if (!validateImageBuffer(req.file.buffer, req.file.mimetype)) return res.status(400).json({ error: "Image contents do not match the selected JPEG, PNG, or WebP file type" });
+  let uploaded;
+  try { uploaded = await uploadImageBuffer(req.file.buffer, `restaurant-saas/${req.restaurant.id}`); }
+  catch (error) {
+    console.error("Cloudinary image upload failed:", error.http_code || error.name || "provider error");
+    return res.status(502).json({ error: "Cloudinary could not upload this image. Check the server credentials and try again." });
   }
-  if (!response.ok) {
-    console.error("Cloudinary upload failed with status", response.status);
-    return res.status(502).json({ error: "Image provider could not process the upload. Check the Cloudinary credentials and try again." });
-  }
-  const uploaded = await response.json().catch(() => null);
   let imageUrl;
   try { imageUrl = new URL(uploaded?.secure_url); } catch {}
   if (!imageUrl || imageUrl.protocol !== "https:" || !uploaded?.public_id) {
     console.error("Cloudinary returned an invalid upload response");
-    return res.status(502).json({ error: "Image provider returned an invalid image URL" });
+    return res.status(502).json({ error: "Cloudinary returned an invalid image URL" });
   }
-  res.status(201).json({ url: imageUrl.href, publicId: uploaded.public_id, width: uploaded.width, height: uploaded.height });
+  res.status(201).json({ success: true, secure_url: imageUrl.href, public_id: uploaded.public_id, message: "Image uploaded successfully" });
 }));
 app.get("/api/owner/orders", auth, owner, asyncRoute(async (req, res) => {
   const { page, limit } = pageParams(req); const filter = { restaurantId: req.user.restaurantId };
@@ -279,6 +270,7 @@ app.patch("/api/admin/restaurants/:id/status", auth, admin, asyncRoute(async (re
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true, runValidators: true }); if (!restaurant) return res.status(404).json({ error: "Restaurant not found" }); res.json({ restaurant: safeRestaurant(restaurant) });
 }));
 
+app.use(sendUploadError);
 app.use((err, _req, res, _next) => { if (err?.message === "Origin is not allowed") return res.status(403).json({ error: "Origin is not allowed" }); if (err?.status === 413) return res.status(413).json({ error: "Request body is too large" }); if (err?.name === "ValidationError") return res.status(400).json({ error: "Invalid data", details: Object.values(err.errors).map((e) => e.message) }); if (err?.code === 11000) return res.status(409).json({ error: "That value is already in use" }); console.error("API error:", err.message); res.status(500).json({ error: "Something went wrong" }); });
 
 async function start() {
