@@ -37,8 +37,25 @@ if (!jwtSecret || jwtSecret.length < 32) {
 const app = express();
 app.disable("x-powered-by");
 app.use((_, res, next) => { res.set({ "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cross-Origin-Resource-Policy": "same-site" }); next(); });
-const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:5173").split(",").map((s) => s.trim());
-app.use(cors({ origin(origin, done) { if (!origin || allowedOrigins.includes(origin)) return done(null, true); return done(new Error("Origin is not allowed")); } }));
+const configuredOrigins = [process.env.CORS_ORIGINS, process.env.CLIENT_ORIGIN]
+  .filter(Boolean)
+  .flatMap((value) => value.split(","))
+  .map((origin) => origin.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+if (process.env.NODE_ENV !== "production") configuredOrigins.push("http://localhost:5173");
+const allowedOrigins = new Set(configuredOrigins);
+// Vercel deployment URLs for this project use `menu-<deployment>-abdul-rehman-abe3.vercel.app`.
+// Anchor the pattern to both the project prefix and team suffix; never allow arbitrary Vercel tenants.
+const vercelPreviewOrigin = /^https:\/\/menu-(?:app|[a-z0-9]{8,})(?:-[a-z0-9-]+)?-abdul-rehman-abe3\.vercel\.app$/i;
+app.use(cors({
+  origin(origin, done) {
+    if (!origin || allowedOrigins.has(origin) || vercelPreviewOrigin.test(origin)) return done(null, true);
+    return done(new Error("Origin is not allowed"));
+  },
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type"],
+  optionsSuccessStatus: 204,
+}));
 app.use(express.json({ limit: "7mb" }));
 const windows = new Map();
 app.use("/api", (req, res, next) => {
